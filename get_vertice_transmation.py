@@ -147,9 +147,9 @@ class SparseLinear(torch.nn.Module):
         self.register_buffer("dense_weight", dense_weight, persistent=False)
 
     def forward(self, x):
-        self.dense_weight.zero_()
-        self.dense_weight[self.sparse_indices[0], self.sparse_indices[1]] = self.sparse_weight
-        return (self.dense_weight @ x.T).T
+        dense = torch.zeros_like(self.dense_weight)
+        dense[self.sparse_indices[0], self.sparse_indices[1]] = self.sparse_weight
+        return (dense @ x.T).T
 
 
 class MHRTorchModel:
@@ -361,28 +361,33 @@ class MHRTorchModel:
         ], dim=-1)
 
         # Forward kinematics: accumulate global transforms
+        # Use lists to avoid inplace operations that break autograd
         parents = self.joint_parents
-
-        global_t = torch.zeros(B, self.n_joints, 3, device=self.device, dtype=joint_parameters.dtype)
-        global_q = torch.zeros(B, self.n_joints, 4, device=self.device, dtype=joint_parameters.dtype)
-        global_s = torch.zeros(B, self.n_joints, device=self.device, dtype=joint_parameters.dtype)
+        global_t_list = [None] * self.n_joints
+        global_q_list = [None] * self.n_joints
+        global_s_list = [None] * self.n_joints
 
         # Process joints in order of depth (FK order)
         for j in self.fk_order:
             p = parents[j].item()
             if p < 0:  # root joint
-                global_t[:, j] = local_t[:, j]
-                global_q[:, j] = local_q[:, j]
-                global_s[:, j] = local_s[:, j]
+                global_t_list[j] = local_t[:, j]
+                global_q_list[j] = local_q[:, j]
+                global_s_list[j] = local_s[:, j]
             else:
                 # global_position[j] = global_position[p] + global_scale[p] * rotate(global_rotation[p], local_position[j])
-                R_p = _quat_to_rot_matrix(global_q[:, p])  # [B, 3, 3]
+                R_p = _quat_to_rot_matrix(global_q_list[p])  # [B, 3, 3]
                 rotated_local_t = torch.einsum("bij, bj -> bi", R_p, local_t[:, j])
-                global_t[:, j] = global_t[:, p] + global_s[:, p].unsqueeze(-1) * rotated_local_t
+                global_t_list[j] = global_t_list[p] + global_s_list[p].unsqueeze(-1) * rotated_local_t
                 # global_rotation[j] = global_rotation[p] * local_rotation[j]
-                global_q[:, j] = _quat_multiply(global_q[:, p], local_q[:, j])
+                global_q_list[j] = _quat_multiply(global_q_list[p], local_q[:, j])
                 # global_scale[j] = global_scale[p] * local_scale[j]
-                global_s[:, j] = global_s[:, p] * local_s[:, j]
+                global_s_list[j] = global_s_list[p] * local_s[:, j]
+
+        # Stack lists into tensors
+        global_t = torch.stack(global_t_list, dim=1)   # [B, 127, 3]
+        global_q = torch.stack(global_q_list, dim=1)   # [B, 127, 4]
+        global_s = torch.stack(global_s_list, dim=1)   # [B, 127]
 
         # Normalize quaternions
         q_norm = torch.norm(global_q, dim=-1, keepdim=True)
@@ -421,8 +426,13 @@ class MHRTorchModel:
         # Extract Euler rotations from joints 2 onwards (skip first 2 global joints)
         joint_euler = jp[:, 2:, 3:6]  # [B, 125, 3]
         pose_6d = _batch6d_from_xyz(joint_euler)  # [B, 125, 6]
-        pose_6d[:, :, 0] -= 1
-        pose_6d[:, :, 4] -= 1
+        # Subtract identity diagonals (avoid inplace to preserve autograd)
+        pose_6d = torch.cat([
+            pose_6d[..., :1] - 1,
+            pose_6d[..., 1:4],
+            pose_6d[..., 4:5] - 1,
+            pose_6d[..., 5:6],
+        ], dim=-1)
         pose_6d_flat = pose_6d.flatten(1, 2)  # [B, 750]
 
         offsets = self.pose_correctives(pose_6d_flat)  # [B, V*3]
@@ -451,8 +461,10 @@ class MHRTorchModel:
 
         # Expand rest_vertices to homogeneous: [B, V, 4]
         V = rest_vertices.shape[1]
-        v_homo = torch.ones(rest_vertices.shape[0], V, 4, device=self.device, dtype=rest_vertices.dtype)
-        v_homo[..., :3] = rest_vertices
+        v_homo = torch.cat([
+            rest_vertices,
+            torch.ones(rest_vertices.shape[0], V, 1, device=self.device, dtype=rest_vertices.dtype),
+        ], dim=-1)
 
         # LBS: v_posed = sum_j w_j * D_j * v_rest
         # weights: [V, 127] → [1, V, 127, 1]

@@ -426,5 +426,116 @@ class TestMultiPoseMeshExport:
         print(f"Meshes saved to: {output_dir}")
 
 
+# ─── Gradient verification tests ───
+
+
+class TestGradientBackpropagation:
+    """Verify that gradients flow correctly through the entire MHR pipeline."""
+
+    @pytest.fixture(scope="class")
+    def pt_model(self):
+        return load_model(lod=1)
+
+    def test_full_pipeline_gradient(self, pt_model):
+        """Gradient should flow from vertices back to all input coefficients."""
+        identity_coeffs = torch.randn(1, NUM_IDENTITY_BLENDSHAPES, requires_grad=True)
+        model_parameters = (0.2 * (torch.rand(1, 204) - 0.5)).detach().requires_grad_(True)
+        face_expr_coeffs = torch.randn(1, NUM_FACE_EXPRESSION_BLENDSHAPES, requires_grad=True)
+
+        verts, deform = pt_model.forward(identity_coeffs, model_parameters, face_expr_coeffs)
+        verts.sum().backward()
+
+        assert identity_coeffs.grad is not None
+        assert identity_coeffs.grad.abs().sum().item() > 0
+        assert model_parameters.grad is not None
+        assert model_parameters.grad.abs().sum().item() > 0
+        assert face_expr_coeffs.grad is not None
+        assert face_expr_coeffs.grad.abs().sum().item() > 0
+
+    def test_deform_matrix_gradient(self, pt_model):
+        """Gradient should flow through deformation matrices back to model_parameters.
+        Note: identity_coeffs/face_expr_coeffs don't affect deform_matrices,
+        so their gradients should be None (correct behavior)."""
+        identity_coeffs = torch.randn(1, NUM_IDENTITY_BLENDSHAPES, requires_grad=True)
+        model_parameters = (0.2 * (torch.rand(1, 204) - 0.5)).detach().requires_grad_(True)
+        face_expr_coeffs = torch.randn(1, NUM_FACE_EXPRESSION_BLENDSHAPES, requires_grad=True)
+
+        _, deform = pt_model.forward(identity_coeffs, model_parameters, face_expr_coeffs)
+        deform.sum().backward()
+
+        # deform_matrices only depend on model_parameters via FK→IBP
+        assert model_parameters.grad is not None
+        assert model_parameters.grad.abs().sum().item() > 0
+        # identity_coeffs and face_expr_coeffs have no effect on deform_matrices
+        assert identity_coeffs.grad is None
+        assert face_expr_coeffs.grad is None
+
+    def test_fk_gradient(self, pt_model):
+        """Gradient should flow through forward kinematics."""
+        jp_input = torch.randn(1, 889, requires_grad=True)
+        skel_state, global_matrices = pt_model.forward_kinematics(jp_input)
+        global_matrices.sum().backward()
+
+        assert jp_input.grad is not None
+        assert jp_input.grad.abs().sum().item() > 0
+
+    def test_lbs_gradient(self, pt_model):
+        """Gradient should flow through LBS (FK → LBS chain)."""
+        jp_input = torch.randn(1, 889, requires_grad=True)
+        skel_state, global_matrices = pt_model.forward_kinematics(jp_input)
+
+        id_c = torch.randn(1, NUM_IDENTITY_BLENDSHAPES)
+        fe_c = torch.randn(1, NUM_FACE_EXPRESSION_BLENDSHAPES)
+        rest_verts = pt_model.blend_shape(id_c, fe_c)
+
+        posed = pt_model.linear_blend_skinning(global_matrices, rest_verts)
+        posed.sum().backward()
+
+        assert jp_input.grad is not None
+        assert jp_input.grad.abs().sum().item() > 0
+
+    def test_pose_correctives_gradient(self, pt_model):
+        """Gradient should flow through pose correctives."""
+        jp_input = torch.randn(1, 889, requires_grad=True)
+        offsets = pt_model.pose_correctives_forward(jp_input)
+        offsets.sum().backward()
+
+        assert jp_input.grad is not None
+        assert jp_input.grad.abs().sum().item() > 0
+
+    def test_gradient_shape(self, pt_model):
+        """Gradient shapes should match input shapes."""
+        identity_coeffs = torch.randn(1, NUM_IDENTITY_BLENDSHAPES, requires_grad=True)
+        model_parameters = (0.2 * (torch.rand(1, 204) - 0.5)).detach().requires_grad_(True)
+        face_expr_coeffs = torch.randn(1, NUM_FACE_EXPRESSION_BLENDSHAPES, requires_grad=True)
+
+        verts, _ = pt_model.forward(identity_coeffs, model_parameters, face_expr_coeffs)
+        verts.sum().backward()
+
+        assert identity_coeffs.grad.shape == identity_coeffs.shape
+        assert model_parameters.grad.shape == model_parameters.shape
+        assert face_expr_coeffs.grad.shape == face_expr_coeffs.shape
+
+    def test_batch_gradient_exists(self, pt_model):
+        """Gradient should flow for both B=1 and B=2 batch sizes."""
+        # B=1
+        id1 = torch.randn(1, NUM_IDENTITY_BLENDSHAPES, requires_grad=True)
+        mp1 = (0.2 * (torch.rand(1, 204) - 0.5)).detach().requires_grad_(True)
+        fe1 = torch.randn(1, NUM_FACE_EXPRESSION_BLENDSHAPES, requires_grad=True)
+        v1, _ = pt_model.forward(id1, mp1, fe1)
+        v1.sum().backward()
+        assert id1.grad is not None and id1.grad.abs().sum() > 0
+        assert mp1.grad is not None and mp1.grad.abs().sum() > 0
+
+        # B=2
+        id2 = torch.randn(2, NUM_IDENTITY_BLENDSHAPES, requires_grad=True)
+        mp2 = (0.2 * (torch.rand(2, 204) - 0.5)).detach().requires_grad_(True)
+        fe2 = torch.randn(2, NUM_FACE_EXPRESSION_BLENDSHAPES, requires_grad=True)
+        v2, _ = pt_model.forward(id2, mp2, fe2)
+        v2.sum().backward()
+        assert id2.grad is not None and id2.grad.abs().sum() > 0
+        assert mp2.grad is not None and mp2.grad.abs().sum() > 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
