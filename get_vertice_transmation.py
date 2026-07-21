@@ -548,6 +548,27 @@ class MHRTorchModel:
 
         return vertices, deform_matrices
 
+    def vertex_transform_matrices(self, deform_matrices: torch.Tensor) -> torch.Tensor:
+        """Compute per-vertex 4x4 transformation matrices from per-joint deform matrices.
+
+        Each vertex's effective transform is the LBS-weighted combination of
+        its influencing joints' deform matrices:
+            M_i = Σ_j w_ij * D_j
+
+        Args:
+            deform_matrices: [B, J, 4, 4] per-joint deformation matrices D_j = G_j * IBP_j
+        Returns:
+            vertex_matrices: [B, V, 4, 4] per-vertex transformation matrices
+        """
+        w = self.dense_skin_weights  # [V, J]
+        # w: [V, J] -> [1, V, J, 1, 1] -> expand to [B, V, J, 1, 1]
+        w_exp = w.unsqueeze(0).unsqueeze(-1).unsqueeze(-1).expand(deform_matrices.shape[0], -1, -1, -1, -1)
+        # deform_matrices: [B, J, 4, 4] -> [B, V, J, 4, 4]
+        D_exp = deform_matrices.unsqueeze(1).expand(-1, w.shape[0], -1, -1, -1)
+        # M_i = Σ_j w_ij * D_j
+        vertex_matrices = (w_exp * D_exp).sum(dim=2)  # [B, V, 4, 4]
+        return vertex_matrices
+
     def transform_deform_matrices(
         self,
         deform_matrices: torch.Tensor,
