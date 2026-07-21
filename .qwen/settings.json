@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 *)",
+      "Bash(sed *)",
+      "Bash(cp *)",
+      "Bash(pixi *)",
+      "Bash(sleep *)",
+      "Bash(curl *)",
+      "Bash(kill *)",
+      "Bash(true)",
+      "Bash(timeout *)",
+      "Agent(Explore)"
+    ]
+  },
+  "$version": 4
+}

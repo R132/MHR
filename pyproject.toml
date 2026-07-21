@@ -57,6 +57,13 @@ hatch-vcs = "*"
 
 [tool.pixi.dependencies]
 pymomentum = ">=0.1.90"
+jupyterlab = ">=4.5.8,<5"
+ipykernel = ">=7.3.0,<8"
+scenepic = ">=1.1.2,<2"
+trimesh = ">=4.12.2,<5"
+matplotlib = ">=3.10.9,<4"
+ipywidgets = ">=8.1.8,<9"
+flask = ">=3.0,<4"
 
 [tool.pixi.feature.py312.dependencies]
 python = "3.12.*"
