@@ -162,8 +162,10 @@ class MHRTorchModel:
         self,
         assets_dir: str = ASSETS_DIR,
         lod: int = 1,
-        device: torch.device = torch.device("cpu"),
+        device: torch.device | None = None,
     ):
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.lod = lod
         self.device = device
         self.n_joints = NUM_JOINTS
@@ -249,7 +251,7 @@ class MHRTorchModel:
 
     def _precompute_fk_order(self):
         """Sort joints by depth for sequential FK traversal."""
-        parents = self.joint_parents.numpy()
+        parents = self.joint_parents.cpu().numpy()
         depth = np.zeros(len(parents), dtype=np.int32)
         for i in range(len(parents)):
             p = parents[i]
@@ -280,10 +282,14 @@ class MHRTorchModel:
         R = _quat_to_rot_matrix(q)  # [B, J, 3, 3]
         sR = s.unsqueeze(-1).unsqueeze(-1) * R  # [B, J, 3, 3]
 
-        M = torch.zeros(pqs.shape[0], pqs.shape[1], 4, 4, device=pqs.device, dtype=pqs.dtype)
-        M[..., :3, :3] = sR
-        M[..., :3, 3] = t
-        M[..., 3, 3] = 1.0
+        # Build 4x4 matrix without inplace operations (for autograd compatibility)
+        row0 = torch.cat([sR[..., 0, :], t[..., 0:1]], dim=-1)  # [B, J, 4]
+        row1 = torch.cat([sR[..., 1, :], t[..., 1:2]], dim=-1)  # [B, J, 4]
+        row2 = torch.cat([sR[..., 2, :], t[..., 2:3]], dim=-1)  # [B, J, 4]
+        zeros3 = torch.zeros_like(t[..., :3])
+        ones1 = torch.ones_like(t[..., 0:1])
+        row3 = torch.cat([zeros3, ones1], dim=-1)  # [0, 0, 0, 1]
+        M = torch.stack([row0, row1, row2, row3], dim=-2)  # [B, J, 4, 4]
 
         if not has_batch:
             M = M.squeeze(0)
@@ -362,14 +368,14 @@ class MHRTorchModel:
 
         # Forward kinematics: accumulate global transforms
         # Use lists to avoid inplace operations that break autograd
-        parents = self.joint_parents
+        parents_cpu = self.joint_parents.cpu().numpy()
         global_t_list = [None] * self.n_joints
         global_q_list = [None] * self.n_joints
         global_s_list = [None] * self.n_joints
 
         # Process joints in order of depth (FK order)
         for j in self.fk_order:
-            p = parents[j].item()
+            p = parents_cpu[j]
             if p < 0:  # root joint
                 global_t_list[j] = local_t[:, j]
                 global_q_list[j] = local_q[:, j]
@@ -546,7 +552,9 @@ class MHRTorchModel:
 def load_model(
     assets_dir: str = ASSETS_DIR,
     lod: int = 1,
-    device: torch.device = torch.device("cpu"),
+    device: torch.device | None = None,
 ) -> MHRTorchModel:
     """Convenience function to load the pure PyTorch MHR model."""
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return MHRTorchModel(assets_dir=assets_dir, lod=lod, device=device)
