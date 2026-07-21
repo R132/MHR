@@ -28,6 +28,7 @@ from get_vertice_transmation import (
     NUM_FACE_EXPRESSION_BLENDSHAPES,
     NUM_JOINTS,
     ASSETS_DIR,
+    NUM_VERTICES_LOD1,
 )
 
 ASSETS_ROOT = os.path.join(os.path.dirname(__file__), "assets")
@@ -424,6 +425,99 @@ class TestMultiPoseMeshExport:
         for line in summary:
             print(line)
         print(f"Meshes saved to: {output_dir}")
+
+
+# ─── Coordinate system transformation tests ───
+
+
+class TestDeformMatrixTransform:
+    """Verify that transform_deform_matrices correctly maps D_j under coordinate changes.
+
+    The key identity: if v_new = T * v_old, then LBS with D_new = T * D * T^{-1}
+    on v_rest_new = T * v_rest should produce v_posed_new = T * v_posed.
+    """
+
+    @pytest.fixture(scope="class")
+    def pt_model(self):
+        return load_model(lod=1)
+
+    def _manual_lbs(self, model, deform_matrices, rest_pose):
+        """Manually compute v_posed = Σ w_j * D_j * v_rest."""
+        V = rest_pose.shape[1]
+        w = model.dense_skin_weights  # [V, 127]
+        v_homo = torch.cat([
+            rest_pose,
+            torch.ones(rest_pose.shape[0], V, 1, device=rest_pose.device, dtype=rest_pose.dtype),
+        ], dim=-1)
+        D = deform_matrices
+        D_exp = D.unsqueeze(1).expand(-1, V, -1, -1, -1)
+        v_exp = v_homo.unsqueeze(2).unsqueeze(-1)
+        transformed = torch.matmul(D_exp, v_exp)
+        w_exp = w.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+        weighted = w_exp * transformed
+        return weighted.sum(dim=2)[:, :, :3, 0]
+
+    def _get_full_rest_pose(self, model, id_c, mp, fe_c):
+        """Get rest pose including pose correctives offsets."""
+        rest = model.blend_shape(id_c, fe_c)
+        jp = model.parameter_transform_forward(mp)
+        if model.pose_correctives is not None:
+            offsets = model.pose_correctives_forward(jp)
+            rest = rest + offsets
+        return rest
+
+    def test_scale_only(self, pt_model):
+        """Scale by 1/100 (cm→m): D_new = S * D * S^{-1}."""
+        id_c, mp, fe_c = _random_inputs()
+        with torch.no_grad():
+            verts, deform = pt_model.forward(id_c, mp, fe_c)
+            rest = self._get_full_rest_pose(pt_model, id_c, mp, fe_c)
+
+        verts_scaled = verts / 100
+        rest_scaled = rest / 100
+        deform_scaled = pt_model.transform_deform_matrices(deform, scale=1/100)
+
+        manual_verts = self._manual_lbs(pt_model, deform_scaled, rest_scaled)
+        assert torch.allclose(manual_verts, verts_scaled, atol=1e-4)
+
+    def test_flip_only(self, pt_model):
+        """Flip y,z axes: D_new = F * D * F."""
+        id_c, mp, fe_c = _random_inputs()
+        with torch.no_grad():
+            verts, deform = pt_model.forward(id_c, mp, fe_c)
+            rest = self._get_full_rest_pose(pt_model, id_c, mp, fe_c)
+
+        flip = torch.tensor([1.0, -1.0, -1.0], device=verts.device)
+        verts_flipped = verts * flip
+        rest_flipped = rest * flip
+        deform_flipped = pt_model.transform_deform_matrices(deform, flip_axes=[1, 2])
+
+        manual_verts = self._manual_lbs(pt_model, deform_flipped, rest_flipped)
+        assert torch.allclose(manual_verts, verts_flipped, atol=1e-4)
+
+    def test_scale_and_flip(self, pt_model):
+        """Combined: /100 and flip y,z (the user's actual use case)."""
+        id_c, mp, fe_c = _random_inputs()
+        with torch.no_grad():
+            verts, deform = pt_model.forward(id_c, mp, fe_c)
+            rest = self._get_full_rest_pose(pt_model, id_c, mp, fe_c)
+
+        flip = torch.tensor([1.0, -1.0, -1.0], device=verts.device)
+        verts_transformed = verts / 100 * flip
+        rest_transformed = rest / 100 * flip
+        deform_transformed = pt_model.transform_deform_matrices(deform, scale=1/100, flip_axes=[1, 2])
+
+        manual_verts = self._manual_lbs(pt_model, deform_transformed, rest_transformed)
+        assert torch.allclose(manual_verts, verts_transformed, atol=1e-4)
+
+    def test_identity_transform(self, pt_model):
+        """No transform → deform_matrices unchanged."""
+        id_c, mp, fe_c = _random_inputs()
+        with torch.no_grad():
+            _, deform = pt_model.forward(id_c, mp, fe_c)
+
+        deform_identity = pt_model.transform_deform_matrices(deform)
+        assert torch.allclose(deform_identity, deform, atol=1e-6)
 
 
 # ─── Gradient verification tests ───

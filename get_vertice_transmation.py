@@ -548,6 +548,51 @@ class MHRTorchModel:
 
         return vertices, deform_matrices
 
+    def transform_deform_matrices(
+        self,
+        deform_matrices: torch.Tensor,
+        scale: float = 1.0,
+        flip_axes: list[int] | None = None,
+    ) -> torch.Tensor:
+        """Apply coordinate system transformation to deformation matrices.
+
+        For vertices transformed by v_new = T * v_old, where T combines
+        scaling and axis flipping, the deform matrices transform as:
+            D_new = T * D * T^{-1}
+
+        Args:
+            deform_matrices: [B, J, 4, 4] original deformation matrices
+            scale: uniform scale factor (e.g. 1/100 for cm→m)
+            flip_axes: list of axis indices to flip (e.g. [1, 2] for flipping y,z)
+        Returns:
+            D_new: [B, J, 4, 4] transformed deformation matrices
+        """
+        if flip_axes is None:
+            flip_axes = []
+
+        # Build T and T_inv as 4x4 matrices
+        # T = diag(scale, scale*sign, scale*sign, 1) where sign=-1 for flipped axes
+        # T_inv = diag(1/scale, 1/(scale*sign), 1/(scale*sign), 1)
+        signs = [1.0, 1.0, 1.0]
+        for ax in flip_axes:
+            signs[ax] = -1.0
+
+        T = torch.zeros(4, 4, device=deform_matrices.device, dtype=deform_matrices.dtype)
+        T_inv = torch.zeros(4, 4, device=deform_matrices.device, dtype=deform_matrices.dtype)
+        for i in range(3):
+            T[i, i] = scale * signs[i]
+            T_inv[i, i] = 1.0 / (scale * signs[i])
+        T[3, 3] = 1.0
+        T_inv[3, 3] = 1.0
+
+        # D_new = T * D * T_inv
+        # Step 1: D * T_inv → scale/flip columns of D
+        # Step 2: T * (D * T_inv) → scale/flip rows and translate
+        intermediate = torch.matmul(deform_matrices, T_inv)
+        D_new = torch.matmul(T, intermediate)
+
+        return D_new
+
 
 def load_model(
     assets_dir: str = ASSETS_DIR,
