@@ -36,3 +36,5 @@ pixi.lock
 assets/
 assets.zip
 __MACOSX/
+
+*.ply
