@@ -1,4 +1,4 @@
-"""Tests for get_vertice_transmation.py — verify pure PyTorch MHR pipeline correctness.
+"""Tests for mhr_torch.py — verify pure PyTorch MHR pipeline correctness.
 
 These tests validate:
 1. The returned deformation matrices D_j = G_j * IBP_j are correct by manually
@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
-from get_vertice_transmation import (
+from mhr_torch import (
     MHRTorchModel,
     load_model,
     _quat_to_rot_matrix,
@@ -285,7 +285,7 @@ class TestAssetIndependence:
     def test_no_pymomentum_import(self):
         """The module should not import pymomentum (only in import lines)."""
         import importlib
-        mod = importlib.import_module("get_vertice_transmation")
+        mod = importlib.import_module("mhr_torch")
         source_file = mod.__file__
         with open(source_file) as f:
             lines = f.readlines()
